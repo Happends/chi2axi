@@ -1,0 +1,11 @@
+stdlib
+ftlib
+util
+sparc
+riscv
+modgen
+amba
+atf
+dftlib
+generic_bm
+grchirnf
