@@ -55,16 +55,6 @@ VSIMOPT+= $(SIMTOP)
 ### Testbench, design and libraries to compile and not to compile ##############
 
 VHDLSYNFILES  = 
-VHDLSYNFILES += $(CFG_DIR)/config.vhd
-VHDLSYNFILES += $(CFG_LOCAL_DIR)/config_local.vhd
-VHDLSYNFILES += $(CORE_DIR)/rev.vhd
-VHDLSYNFILES += $(CORE_DIR)/cfgmap.vhd
-VHDLSYNFILES += $(CORE_DIR)/noelvcore.vhd
-VHDLSYNFILES += $(BASE_DIR)/rtl/ahbrom.vhd
-VHDLSYNFILES += $(BASE_DIR)/rtl/ahbrom64.vhd
-VHDLSYNFILES += $(BASE_DIR)/rtl/ahbrom128.vhd
-VHDLSYNFILES += $(BASE_DIR)/rtl/noelvmp.vhd 
-VHDLSIMFILES  = $(TB_DIR)/testbench.vhd 
 
 TECHLIBS = inferred
 
