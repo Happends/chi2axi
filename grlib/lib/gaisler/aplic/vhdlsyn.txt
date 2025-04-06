@@ -1,2 +1,0 @@
-aplic.vhd
-graplic_ahb.vhd

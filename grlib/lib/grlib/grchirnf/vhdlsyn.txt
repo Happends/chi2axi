@@ -1,4 +1,0 @@
-grchirnf_pkg.vhd
-grchirnf_apb.vhd
-grchirnf_ctrl.vhd
-grchirnf_core.vhd

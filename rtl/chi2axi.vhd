@@ -3,6 +3,7 @@
 
 
 entity chi2axi()
+
 component ahbm2axi4 is                                                                            
 generic (                                                                                       
 aximid          : integer range 0 to 15                := 0;                                  
@@ -18,10 +19,11 @@ scantest        : integer                              := 0
 port (                                                                                          
 rstn  : in  std_logic;                                                                        
 clk   : in  std_logic;                                                                        
-ahbsi : in  ahb_slv_in_type;                                                                  
-ahbso : out ahb_slv_out_type;                                                                 
+chisi : in  ;                                                                  
+chiso : out ;                                                                 
 aximi : in  axi_somi_type;                                                                    
 aximo : out axi4_mosi_type                                                                    
 );                                                                                            
 end component;                                                                                    
 
+end entity;

@@ -1,3 +1,0 @@
-noelvcpu.vhd
-dummy_pnp.vhd
-noelvsys.vhd
