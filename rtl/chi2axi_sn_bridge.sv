@@ -13,7 +13,8 @@ import llc_config_pkg::*;
 import llc_common_pkg::*; 
 
 module chi2ahb_sn_bridge #(
-    parameter HINDEX = 0
+    parameter HINDEX = 0,
+    parameter AXI_DW = 128 // should be set to AXI_DW form amba::*; but generic now since vhdl simulation impossible
 )
 (
     input logic clk, 
@@ -24,9 +25,11 @@ module chi2ahb_sn_bridge #(
     chi_channel_inf.tx  tx_rsp, 
     chi_channel_inf.tx  tx_dat,
     // AHB side
-    output ahb_mst_out_type  ahb_mo, 
-    input  ahb_mst_in_type   ahb_mi
+    output axi4_mosi_type axi_mosi, 
+    input  axi_somi_type   axi_simo
 ); 
+
+AXI_LENGTH = DATA_W / AXI_DW;
 
 request_flit_t  chi_req_q; 
 data_flit_t     chi_data_flit_out, chi_data_flit_in;
@@ -38,10 +41,10 @@ logic [31:0]    ahb_addr_q, ahb_addr_d, ahb_addr_increment;
 logic [127:0]   rdata0, rdata1, rdata2, rdata3; 
 logic           read_burst; 
 logic           write_burst; 
-enum {RESET, IDLE, R0, R1, R2, R3, RSEND, WRECEIVE, W0, W1, W2, W3} q_current_state, d_next_state, q_last_state; 
+enum {IDLE, DECODE_CHI_READ, SEND_AXI_READ, DECODE_AXI_READ_RESPONSE, SEND_CHI_READ_RESPONSE, DECODE_CHI_WRITE, SEND_AXI_WRITE, DECODE_AXI_WRITE_RESPONSE, SEND_CHI_WRITE_RESPONSE} q_current_state, d_next_state; 
 
-assign read_burst = ((q_current_state == R0) || (q_current_state == R1) || (q_current_state == R2) || (q_current_state == R3)) ? 1'b1 : 1'b0; 
-assign write_burst = ((q_current_state == W0) || (q_current_state == W1) || (q_current_state == W2) || (q_current_state == W3)) ? 1'b1 : 1'b0; 
+logic stop;
+assign stop = (d_next_state != IDLE || d_next_state != DECODE_CHI_READ || d_next_state != DECODE_CHI_WRITE);
 
 //=============================================================================
 //============================== CHI Interface ================================
@@ -49,7 +52,7 @@ assign write_burst = ((q_current_state == W0) || (q_current_state == W1) || (q_c
 always_ff @(posedge clk or negedge arst_n) begin
     if (~arst_n) begin 
         chi_req_valid <= 0; 
-    end else if (rx_req.flit_v) begin 
+    end else if (rx_req.flit_v && !stop) begin 
         chi_req_valid <= 1; 
         chi_req_q <= rx_req.flit; 
     end else if (d_next_state == IDLE) begin 
@@ -57,7 +60,28 @@ always_ff @(posedge clk or negedge arst_n) begin
     end 
 end
 
-assign rx_req.lcrd_v = (q_current_state != IDLE) && (d_next_state == IDLE) ? 1'b1 : 1'b0; 
+logic send_credit_rsp;
+int sent_credits_rsp;
+always_comb begin
+    if (sent_credits_rsp == 0 && d_next_state == IDLE) begin
+        send_credit_rsp = 1;
+    end else if (sent_credits_rsp == 0 && tx_rsp.flit_v) begin
+        send_credit_rsp = 1;
+    end else begin
+        send_credit_rsp = 0;
+    end
+end
+
+always_ff @(posedge clk) begin
+    if (send_credits_rsp) begin
+        sent_credits_rsp = sent_credits_rsp + 1;
+    end else if (chi_req_valid && sent_credits_rsp != 0) begin
+        sent_credits_rsp = sent_credits_rsp - 1;
+    end
+end
+
+
+assign rx_req.lcrd_v = send_credit_rsp;
 
 // -------- CHI Interface - RSP out: 
 
@@ -76,14 +100,14 @@ assign chi_rsp_flit.resp        = 0; // default value
 assign chi_rsp_flit.qos         = '{default: 1}; // set max prio (same for all messages)
 
 assign tx_rsp.flit = chi_rsp_flit; 
-assign tx_rsp.flit_v = (q_current_state == IDLE) && (d_next_state == WRECEIVE) ? 1'b1 : 1'b0; 
+assign tx_rsp.flit_v = (d_next_state == DECODE_AXI_WRITE_RESPONSE_AND_SEND_CHI || d_next_state == SEND_CHI_READ_RESPONSE) ? 1'b1 : 1'b0; 
 
 
 // -------- CHI interface - DAT in: 
 always_ff @(posedge clk or negedge arst_n) begin
     if (~arst_n) begin 
         chi_data_flit_in_valid <= 1'b0; 
-    end else if (rx_dat.flit_v) begin 
+    end else if (rx_dat.flit_v && !stop) begin 
         chi_data_flit_in_valid <= 1'b1; 
         chi_data_flit_in <= rx_dat.flit; 
     end else if (d_next_state == IDLE) begin 
@@ -91,7 +115,27 @@ always_ff @(posedge clk or negedge arst_n) begin
     end 
 end 
 
-assign rx_dat.lcrd_v = (q_current_state != IDLE) && (d_next_state == IDLE) ? 1'b1 : 1'b0; 
+logic send_credit_data;
+int sent_credits_data;
+always_comb begin
+    if (sent_credits_data == 0 && d_next_state == IDLE) begin
+        send_credit_data = 1;
+    end else if (sent_credits_data == 0 && tx_rsp.flit_v) begin
+        send_credit_data = 1;
+    end else begin
+        send_credit_data = 0;
+    end
+end
+
+always_ff @(posedge clk) begin
+    if (send_credits_data ) begin
+        sent_credits_data = sent_credits_data + 1;
+    end else if (chi_data_flit_in_valid && sent_credits_data != 0) begin
+        sent_credits_data = sent_credits_data - 1;
+    end
+end
+
+assign rx_dat.lcrd_v = send_credit_data;
 
 
 // -------- CHI interface - DAT out: 
@@ -113,202 +157,213 @@ assign chi_data_flit_out.tgt_id         = HN_ID;
 assign chi_data_flit_out.opcode         = COMP_DATA; 
 assign chi_data_flit_out.home_nid       = HN_ID; 
 assign chi_data_flit_out.dbid           = 0; // there is only one req buff entry 
-assign chi_data_flit_out.data           = {rdata0, rdata1, rdata2, rdata3}; //TODO: check if this order is correct
+assign chi_data_flit_out.data           = axi_read_data; //TODO: check if this order is correct
 assign chi_data_flit_out.resp           = 3'b000; // doesn't matter / not supported
 
 assign tx_dat.flit = chi_data_flit_out; 
-assign tx_dat.flit_v = (q_last_state == RSEND) ? 1'b1 : 1'b0; 
+assign tx_dat.flit_v = next_state == SEND_CHI_READ_RESPONSE ? 1'b1 : 1'b0; 
 
 //TODO: make sure that we have NoC credit 
+
+
+//=============================================================================
+//================================== AXI interface  ===============================
+
+
+// ------- AXI signals
+
+axi_somi_type axi_somi;
+axi4_mosi_type axi_mosi;
+
+logic [AXI_ID_WIDTH-1:0] axi_id;
+logic [32-1:0] axi_addr;
+logic [4-1:0] axi_len;
+logic [3-1:0] axi_size;
+
+logic [$clog2(AXI_DW)-1:0] chi_index;
+
+
+// ------- AXI mosi signal assignments
+
+logic [DATA_W-1:0] axi_read_data;
+always_ff @(posedge clk) begin
+    if (next_state == DECODE_CHI_WRITE || DECODE_CHI_READ_AND_SEND_AXI) begin
+        chi_index <= (AXI_LENGTH-1)*AXI_DW;
+    end else if ((next_state == SEND_AXI_WRITE && axi_somi.w.ready) || (next_state == DECODE_AXI_READ_RESPONSE && axi_somi.r.valid)) begin
+        if (chi_index == 0) begin
+            $display("chi_index error!! chi_index = %d before decrement", chi_index);
+        end
+        read_data[chi_index+AXI_DW-1:chi_index] <= axi_somi.r.data;
+        chi_index <= chi_index - AXI_DW;
+    end else begin
+        chi_index <= {($clog2(AXI_DW)/4)'{4'hC}};
+    end
+end
+
+always_comb begin
+    if (next_state == DECODE_CHI_WRITE) begin // TODO: change all inputs to regs or imidiately from the input
+        axi_mosi.aw.id = chi_data_flit_in.txn_id; // assuming th etransaction id in chi is the same as axi id
+        axi_mosi.aw.addr = chi_data_flit_in.addr;
+        axi_mosi.aw.len = AXI_LENGTH;
+        axi_mosi.aw.size =  AXI_DW;
+        axi_mosi.aw.burst = INCR; // 2'b10
+        axi_mosi.aw.lock = 1'b0; // set to 0 for now
+        axi_mosi.aw.cache = chi_data_flit_in.mem_attr; // this is not correct but set like this for now
+        axi_mosi.aw.prot = 1'b0; // set to 0 for now
+        axi_mosi.aw.valid = 1'b1;
+        axi_mosi.aw.qos = chi_data_flit_in.qos;
+    end else begin
+        axi_mosi.aw = '{default: '0};
+    end
+end
+
+always_comb begin
+    if (next_state == SEND_AXI_WRITE) begin
+        axi_mosi.w.data = chi_data_flit.data[chi_index+AXI_DW-1:chi_index];
+        axi_mosi.w.strb = '1;
+        axi_mosi.w.last = if chi_index == 0 ? 1'b1 : 1'b0;
+        axi_mosi.w.valid = 1'b1;
+    end else begin
+        axi_mosi.w = '{default: '0};
+
+    end
+end
+
+always_comb begin
+    if (next_state == DECODE_AXI_WRITE_RESPONSE_AND_SEND_CHI) begin
+        axi_mosi.b.ready = 1;
+    end else begin
+        axi_mosi.b = {default: '0};
+    end
+end
+
+
+always_comb begin
+    if (next_state == DECODE_CHI_READ_AND_SEND_AXI) begin
+        axi_mosi.ar.id = chi_req_q.txn_id;
+        axi_mosi.ar.addr = chi_req_q.addr;
+        axi_mosi.ar.len = AXI_LENGTH;
+        axi_mosi.ar.size = AXI_DW;
+        axi_mosi.ar.burst = INCR; // 2'b10
+        axi_mosi.ar.lock = 1'b0;
+        axi_mosi.ar.cache = chi_req_q.txn_id;
+        axi_mosi.ar.prot = 1'b0;
+        axi_mosi.ar.valid = 1'b1;
+        axi_mosi.ar.qos = chi_req_q.qos;
+    end
+end
+
+always_comb begin
+    if (next_state == DECODE_AXI_READ_RESPONSE) begin
+        axi_mosi.r.ready = 1'b1;
+    end
+end
+
+
+
+// ------- AXI somi signal assignments
+
+// assign axi_somi.aw.ready =
+// 
+// assign axi_somi.w.ready =
+// 
+// assign axi_somi.b.id =
+// assign axi_somi.b.resp = 
+// assign axi_somi.b.valid =
+// 
+// assign axi_somi.ar.ready =
+// 
+// assign axi_somi.r.id =
+// assign axi_somi.r.data =
+// assign axi_somi.r.resp =
+// assign axi_somi.r.last =
+// assign axi_somi.r.valid =
+
+
+
+
+always_comb begin
+    
+    if (d_next_state == DECODE_AXI_READ_RESPONSE)
+
+
+end
+
 
 
 
 //=============================================================================
 //================================== Internals  ===============================
-
-// --------  handling the address for different beats:
-always_ff @(posedge clk or negedge arst_n) begin
-    if (~arst_n) begin 
-        ahb_addr_q <= 0; 
-    end else begin 
-        ahb_addr_q <= ahb_addr_d; 
-    end     
-end
-
-// each beat contains 128 bits i.e. 4-words so the address should increase by 128/8 = 16 
-assign ahb_addr_increment = ahb_addr_q + 16; 
-
-always_comb begin
-    // ahb_addr_q should be input addr while q_current_state is R0 or W0
-    // ahb_addr_q should be its previous value + increment while q_current_state is R1-3 or W1-3 
-    // ahb_addr_q should should not increment if the state is not changing i.e. hready = 0 
-    //if (!(read_burst || write_burst)) begin 
-    //    ahb_addr_d = 0; 
-    //end else 
-    if ((d_next_state == R0) || (d_next_state == W0)) begin 
-        ahb_addr_d = chi_req_q.addr[31:0]; 
-    end else if (d_next_state != q_current_state) begin 
-        ahb_addr_d = ahb_addr_increment; 
-    end else begin 
-        ahb_addr_d = ahb_addr_q; 
-    end 
-end
-
 // --------  FSM: 
 always_ff @(posedge clk or negedge arst_n) begin
     if (~arst_n) begin 
-        q_current_state <= RESET; 
-        q_last_state <= RESET; 
+        q_current_state <= IDLE;
     end else begin 
         q_current_state <= d_next_state; 
-        q_last_state <= q_current_state; 
     end 
 end
 
 always_comb begin
-    d_next_state = IDLE; 
     unique case (q_current_state)
-        RESET: begin 
-            d_next_state = IDLE; 
-        end 
+        SEND_CHI_READ_RESPONSE,                     // chi likely has an acc mechanism, in that case change
         IDLE: begin 
-            if (chi_req_valid && (chi_req_q.opcode == READ_NO_SNP)) begin 
-                d_next_state = R0; 
-            end else if (chi_req_valid && (chi_req_q.opcode == WRITE_NO_SNP_FULL)) begin 
-                d_next_state = WRECEIVE;
-            end else begin 
-                d_next_state = IDLE; 
-            end 
+            if (chi_req_valid && (chi_req_q.opcode == READ_NO_SNP)) begin
+                d_next_state = DECODE_CHI_READ_AND_SEND_AXI;
+            end else if (chi_req_valid && (chi_req_q.opcode == WRITE_NO_SNP_FULL)) begin
+                d_next_state = DECODE_CHI_WRITE; 
+            end else begin
+                d_next_state = IDLE;
+            end
         end
-        R0: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = R0; 
-            end else begin 
-                d_next_state = R1; 
-            end 
-        end 
-        R1: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = R1; 
-            end else begin 
-                d_next_state = R2; 
-            end 
-        end 
-        R2: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = R2; 
-            end else begin 
-                d_next_state = R3; 
-            end 
-        end 
-        R3: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = R3; 
-            end else begin 
-                d_next_state = RSEND; 
-            end 
-        end 
-        RSEND: begin 
-            d_next_state = IDLE; 
-        end 
-        WRECEIVE: begin 
-            if (chi_data_flit_in_valid) begin 
-                d_next_state = W0; 
-            end else begin 
-                d_next_state = WRECEIVE; 
-            end 
-        end 
-        W0: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = W0; 
-            end else begin 
-                d_next_state = W1; 
-            end 
-        end 
-        W1: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = W1; 
-            end else begin 
-                d_next_state = W2; 
-            end 
-        end 
-        W2: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = W2; 
-            end else begin 
-                d_next_state = W3; 
-            end 
-        end 
-        W3: begin 
-            if (!ahb_mi.hready) begin 
-                d_next_state = W3; 
-            end else begin 
-                d_next_state = IDLE; 
-            end 
-        end 
+        DECODE_CHI_READ_AND_SEND_AXI: begin
+            if (axi_simo.ar.ready) begin
+                d_next_state = DECODE_AXI_READ_RESPONSE
+            end else begin
+                d_next_state = DECODE_CHI_READ_AND_SEND_AXI;
+            end
+        end
+        DECODE_AXI_READ_RESPONSE: begin
+            if (axi_simo.r.last && axi_simo.r.valid) begin
+                if (chi_index != 0) begin
+                    $display("chi_index not 0: %d, when changing to send response back through chi");
+                end
+                d_next_state = DECODE_AXI_READ_RESPONSE;
+            end else begin
+                d_next_state = SEND_CHI_READ_RESPONSE;
+            end
+        end
+        DECODE_CHI_WRITE: begin
+            if (axi_simo.aw.ready) begin
+                d_next_state = SEND_AXI_WRITE;
+            end else begin
+                d_next_state = DECODE_CHI_WRITE;
+            end
+        end
+        SEND_AXI_WRITE: begin
+            if (axi_somi.w.ready && chi_index == 0) begin
+                d_next_state = DECODE_AXI_WRITE_RESPONSE_AND_SEND_CHI;
+            end else begin
+                d_next_state = SEND_AXI_WRITE;
+            end
+        end
+        DECODE_AXI_WRITE_RESPONSE_AND_SEND_CHI: begin
+            if (axi_simo.b.valid && axi_simo.b.resp == && axi_simo.b.id == ) begin
+                if (chi_req_valid && (chi_req_q.opcode == READ_NO_SNP)) begin
+                    d_next_state = DECODE_CHI_READ_AND_SEND_AXI;
+                end else if (chi_req_valid && (chi_req_q.opcode == WRITE_NO_SNP_FULL)) begin
+                    d_next_state = DECODE_CHI_WRITE; 
+                end else begin
+                    d_next_state = IDLE;
+                end
+            end else begin
+                d_next_state = DECOE_AXI_WRITE_RESPONSE_AND_SEND_CHI;
+            end
+        end
+        default: begin
+            d_next_state = IDLE;
+        end
     endcase 
 end
-
-//=============================================================================
-//================================ AHB Interface ==============================
-
-// AHB master interface 
-assign ahb_mo.hlock = 1'b0; 
-assign ahb_mo.haddr = ahb_addr_q; 
-   assign ahb_mo.hsize = 3'b100;
- // 128 (4-word)
-   assign ahb_mo.hburst = 3'b011;
- // INCR4 4-beat incrementing burst 
-   assign ahb_mo.hprot = 4'b0011;
- // Modifilable|Bufferable|Privileged|Data/Opcode
-assign ahb_mo.hirq = 0; 
-assign ahb_mo.hconfig = '{default: 0};  
-assign ahb_mo.hindex = HINDEX; 
-assign ahb_mo.hbusreq = (read_burst || write_burst) ? 1'b1 : 1'b0; 
-assign ahb_mo.hwrite = write_burst; 
-always_comb begin
-    if ((q_current_state == R0) || (q_current_state == W0)) begin 
-        ahb_mo.htrans   = 2'b10; //NONSEQ
-    end else if (read_burst || write_burst) begin 
-        ahb_mo.htrans   = 2'b11; //SEQ 
-    end else begin 
-        ahb_mo.htrans   = 2'b00; //IDLE 
-    end 
-end
-always_comb begin
-    if ((q_last_state == W0) && (q_current_state == W1)) begin 
-        ahb_mo.hwdata = chi_data_flit_in.data[511:384]; //TODO: Check if this order is correct
-    end else if ((q_last_state == W1) && (q_current_state == W2)) begin 
-        ahb_mo.hwdata = chi_data_flit_in.data[383:256];
-    end else if ((q_last_state == W2) && (q_current_state == W3)) begin 
-        ahb_mo.hwdata = chi_data_flit_in.data[255:128];
-    end else if ((q_last_state == W3) && (q_current_state == IDLE)) begin 
-        ahb_mo.hwdata = chi_data_flit_in.data[127:0];
-    end else begin 
-        ahb_mo.hwdata = 0; 
-    end 
-end
-
-
-// ------ read data buffers: 
-always_ff @(posedge clk or negedge arst_n) begin
-    if (~arst_n) begin 
-        rdata0 <= 0; 
-        rdata1 <= 0; 
-        rdata2 <= 0; 
-        rdata3 <= 0; 
-    end else if (ahb_mi.hready && (q_current_state == R1)) begin
-        rdata0 <= ahb_mi.hrdata;        
-    end else if (ahb_mi.hready && (q_current_state == R2)) begin
-        rdata1 <= ahb_mi.hrdata;
-    end else if (ahb_mi.hready && (q_current_state == R3)) begin
-        rdata2 <= ahb_mi.hrdata;        
-    end else if (ahb_mi.hready && (q_current_state == RSEND)) begin
-        rdata3 <= ahb_mi.hrdata;  
-    end     
-end
-
-
 
 
 endmodule
